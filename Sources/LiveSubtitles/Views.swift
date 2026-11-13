@@ -16,6 +16,12 @@ struct ControlView: View {
                 ForEach(model.targetOptions) { Text($0.name).tag($0.id) }
             }
 
+            Picker("자막 속도", selection: $model.pace) {
+                ForEach(SubtitlePace.allCases) { Text($0.name).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .disabled(model.isRunning || model.isStarting)
+
             LabeledContent("글자 크기") {
                 Slider(value: $model.fontSize, in: 16...72, step: 2)
                 Text("\(Int(model.fontSize))").monospacedDigit().frame(width: 28, alignment: .trailing)

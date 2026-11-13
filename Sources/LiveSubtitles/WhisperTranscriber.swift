@@ -6,6 +6,39 @@ import WhisperKit
 /// Audio accumulates until the speaker pauses (or a length limit is hit), then that stretch is transcribed
 /// in one go. Each result is a finished piece of speech, in whatever language was spoken.
 /// `append` may be called from any thread; callbacks arrive on the main thread.
+/// How eagerly speech is cut into pieces: shorter pieces appear sooner but give Whisper less context.
+enum SubtitlePace: String, CaseIterable, Identifiable {
+    case fast, balanced, accurate
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .fast: return "빠르게"
+        case .balanced: return "보통"
+        case .accurate: return "정확하게"
+        }
+    }
+
+    fileprivate struct Timing {
+        /// Seconds of quiet that end an utterance.
+        let pause: Double
+        /// The shorter pause accepted once an utterance has run for `longUtterance` seconds.
+        let shortPause: Double
+        let longUtterance: Double
+        /// Speech that never pauses is cut after this many seconds.
+        let maxUtterance: Double
+    }
+
+    fileprivate var timing: Timing {
+        switch self {
+        case .fast: return Timing(pause: 0.3, shortPause: 0.2, longUtterance: 2, maxUtterance: 4)
+        case .balanced: return Timing(pause: 0.4, shortPause: 0.2, longUtterance: 3, maxUtterance: 7)
+        case .accurate: return Timing(pause: 0.6, shortPause: 0.3, longUtterance: 5, maxUtterance: 10)
+        }
+    }
+}
+
 final class WhisperTranscriber: @unchecked Sendable {
     struct Utterance {
         let text: String
@@ -20,25 +53,31 @@ final class WhisperTranscriber: @unchecked Sendable {
     /// Loudness is judged in 0.1 s frames.
     private static let frameLength = sampleRate / 10
     private static let speechThreshold: Float = 0.005
-    /// Frames of quiet that end an utterance, and the shorter pause accepted once it is already long.
-    private static let pauseFrames = 6
-    private static let shortPauseFrames = 3
-    private static let longUtterance = 5 * sampleRate
-    /// Speech that never pauses is cut here.
-    private static let maxUtterance = 10 * sampleRate
     private static let minSpeechFrames = 3
     private static let leadInFrames = 2
 
     private let whisper: WhisperKit
     private let options: DecodingOptions
+    private let pauseFrames: Int
+    private let shortPauseFrames: Int
+    private let longUtterance: Int
+    private let maxUtterance: Int
     private let lock = NSLock()
     private var samples: [Float] = []  // guarded by `lock`
     private var task: Task<Void, Never>?
 
     /// - Parameter language: Whisper language code, or nil to detect it for every utterance.
-    init(whisper: WhisperKit, language: String?) {
+    init(whisper: WhisperKit, language: String?, pace: SubtitlePace) {
         self.whisper = whisper
-        options = DecodingOptions(language: language, detectLanguage: language == nil, skipSpecialTokens: true)
+        // One retry at a higher temperature instead of the default five keeps hard passages from stalling.
+        options = DecodingOptions(
+            language: language, temperatureFallbackCount: 1, detectLanguage: language == nil, skipSpecialTokens: true)
+        let timing = pace.timing
+        let framesPerSecond = Double(Self.sampleRate / Self.frameLength)
+        pauseFrames = Int((timing.pause * framesPerSecond).rounded())
+        shortPauseFrames = Int((timing.shortPause * framesPerSecond).rounded())
+        longUtterance = Int(timing.longUtterance * Double(Self.sampleRate))
+        maxUtterance = Int(timing.maxUtterance * Double(Self.sampleRate))
     }
 
     func start() {
@@ -65,7 +104,7 @@ final class WhisperTranscriber: @unchecked Sendable {
     private func run() async {
         while !Task.isCancelled {
             guard let chunk = nextChunk() else {
-                try? await Task.sleep(for: .milliseconds(150))
+                try? await Task.sleep(for: .milliseconds(50))
                 continue
             }
             var consumed = chunk.samples.count
@@ -120,7 +159,7 @@ final class WhisperTranscriber: @unchecked Sendable {
         frames.removeFirst(leadingSilence)
 
         let trailingSilence = frames.reversed().prefix { !$0 }.count
-        let neededPause = samples.count > Self.longUtterance ? Self.shortPauseFrames : Self.pauseFrames
+        let neededPause = samples.count > longUtterance ? shortPauseFrames : pauseFrames
         if trailingSilence >= neededPause {
             let chunk = samples
             samples.removeAll(keepingCapacity: true)
@@ -128,7 +167,7 @@ final class WhisperTranscriber: @unchecked Sendable {
             guard frames.filter({ $0 }).count >= Self.minSpeechFrames else { return nil }
             return Chunk(samples: chunk, forced: false)
         }
-        if samples.count >= Self.maxUtterance {
+        if samples.count >= maxUtterance {
             return Chunk(samples: samples, forced: true)
         }
         return nil

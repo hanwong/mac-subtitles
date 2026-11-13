@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
     /// Whisper language code of the audio, or `automatic` to detect it utterance by utterance.
     @Published var audioLanguageID: String { didSet { save(audioLanguageID, "audioLanguage") } }
     @Published var targetLanguageID: String { didSet { save(targetLanguageID, "targetLanguage") } }
+    @Published var pace: SubtitlePace { didSet { save(pace.rawValue, "pace") } }
     @Published var fontSize: Double { didSet { save(fontSize, "fontSize") } }
     @Published var showOriginal: Bool { didSet { save(showOriginal, "showOriginal") } }
 
@@ -76,6 +77,7 @@ final class AppModel: ObservableObject {
         let savedAudio = defaults.string(forKey: "audioLanguage") ?? Self.automatic
         audioLanguageID = audioOptions.contains { $0.id == savedAudio } ? savedAudio : Self.automatic
         targetLanguageID = defaults.string(forKey: "targetLanguage") ?? "ko"
+        pace = defaults.string(forKey: "pace").flatMap { SubtitlePace(rawValue: $0) } ?? .balanced
         fontSize = defaults.object(forKey: "fontSize") as? Double ?? 32
         showOriginal = defaults.bool(forKey: "showOriginal")
     }
@@ -127,7 +129,7 @@ final class AppModel: ObservableObject {
         }
 
         let transcriber = WhisperTranscriber(
-            whisper: whisper, language: audioLanguageID == Self.automatic ? nil : audioLanguageID)
+            whisper: whisper, language: audioLanguageID == Self.automatic ? nil : audioLanguageID, pace: pace)
         transcriber.onUtterance = { [weak self] utterance in
             MainActor.assumeIsolated { self?.received(utterance) }
         }
