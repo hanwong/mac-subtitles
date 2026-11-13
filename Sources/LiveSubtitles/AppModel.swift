@@ -41,6 +41,9 @@ final class AppModel: ObservableObject {
     private var clearTask: Task<Void, Never>?
     /// Number of characters of the segment in progress that were already shown as sentences.
     private var committed = 0
+    /// Words of an unfinished sentence left over when a segment ended, waiting to be joined with what comes next.
+    private var pending = ""
+    private var flushTask: Task<Void, Never>?
 
     private static let targetLanguageIDs = [
         "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "it", "pt", "ru",
@@ -48,6 +51,9 @@ final class AppModel: ObservableObject {
     ]
     /// How long a subtitle stays on screen after the audio goes quiet.
     private static let subtitleLifetime: Duration = .seconds(6)
+    /// How long an unfinished sentence waits for the speaker to continue before it is shown as is.
+    private static let pendingLifetime: Duration = .seconds(2)
+    private static let maxPendingLength = 150
 
     private init() {
         let defaults = UserDefaults.standard
@@ -172,7 +178,9 @@ final class AppModel: ObservableObject {
         transcriber = nil
         await capture.stop()
         clearTask?.cancel()
+        flushTask?.cancel()
         committed = 0
+        pending = ""
         heardText = ""
         audioLevel = nil
         recognitionError = ""
@@ -189,35 +197,72 @@ final class AppModel: ObservableObject {
         guard isRunning else { return }
         heardText = text
         recognitionError = ""
+        flushTask?.cancel()
+
         let characters = Array(text)
         // The recognizer sometimes starts its transcript over mid-segment.
         if characters.count < committed { committed = 0 }
-        let end = isFinal ? characters.count : Self.lastSentenceEnd(in: characters)
+        let end = Self.lastSentenceEnd(in: characters, requiringTextAfter: !isFinal)
         if end > committed {
-            let sentence = String(characters[committed..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            emit(joined(pending, String(characters[committed..<end])))
+            pending = ""
             committed = end
-            if !sentence.isEmpty { emit(sentence) }
         }
-        if isFinal { committed = 0 }
+        guard isFinal else { return }
+
+        // The segment ended mid-sentence (a breath, or the length limit). Hold the words back and
+        // translate them together with whatever comes next, instead of as a fragment on their own.
+        let carriedOver = !pending.isEmpty
+        pending = joined(pending, String(characters[committed...]))
+        committed = 0
+        guard !pending.isEmpty else { return }
+        if carriedOver || pending.count > Self.maxPendingLength {
+            flushPending()
+        } else {
+            flushTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.pendingLifetime)
+                guard !Task.isCancelled else { return }
+                self?.flushPending()
+            }
+        }
     }
 
-    /// Index just past the last sentence terminator that already has more speech after it.
-    /// Waiting for the following words keeps a sentence from being cut at punctuation the recognizer later revises.
-    private static func lastSentenceEnd(in characters: [Character]) -> Int {
-        var hasTextAfter = false
+    private func flushPending() {
+        flushTask?.cancel()
+        let sentence = pending
+        pending = ""
+        emit(sentence)
+    }
+
+    private func joined(_ first: String, _ second: String) -> String {
+        let first = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        let second = second.trimmingCharacters(in: .whitespacesAndNewlines)
+        if first.isEmpty || second.isEmpty { return first + second }
+        let unspaced: [Locale.LanguageCode] = [.japanese, .chinese, .thai]
+        let separator = sourceLanguage.languageCode.map(unspaced.contains) == true ? "" : " "
+        return first + separator + second
+    }
+
+    /// Index just past the last sentence terminator. While the segment is still in progress the terminator
+    /// must already have more speech after it, so a sentence isn't cut at punctuation the recognizer later revises.
+    private static func lastSentenceEnd(in characters: [Character], requiringTextAfter: Bool) -> Int {
+        var canEnd = !requiringTextAfter
         for index in characters.indices.reversed() {
             let character = characters[index]
-            if hasTextAfter {
+            if canEnd {
                 if "。？！?!".contains(character) { return index + 1 }
-                // A period only ends a sentence when followed by a space ("3.5" and "U.S.A" don't).
-                if character == ".", characters[index + 1].isWhitespace { return index + 1 }
+                // A period only ends a sentence at the end or before a space ("3.5" and "U.S.A" don't).
+                if character == ".", index + 1 == characters.count || characters[index + 1].isWhitespace {
+                    return index + 1
+                }
             }
-            if !character.isWhitespace { hasTextAfter = true }
+            if !character.isWhitespace { canEnd = true }
         }
         return 0
     }
 
     private func emit(_ sentence: String) {
+        guard !sentence.isEmpty else { return }
         if needsTranslation {
             requests?.yield(sentence)
         } else {
