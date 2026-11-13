@@ -68,11 +68,11 @@ struct SubtitleView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// At most two lines; when a sentence runs long the newest words stay visible.
+    /// A whole sentence at a time: long ones shrink a little before they are cut off.
     private func line(_ text: String) -> some View {
         Text(text)
-            .lineLimit(2)
-            .truncationMode(.head)
+            .lineLimit(3)
+            .minimumScaleFactor(0.7)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)
     }

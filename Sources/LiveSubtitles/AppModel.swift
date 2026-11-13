@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
     private var transcriber: SpeechTranscriber?
     private var requests: AsyncStream<String>.Continuation?
     private var clearTask: Task<Void, Never>?
+    /// Number of characters of the segment in progress that were already shown as sentences.
+    private var committed = 0
 
     private static let targetLanguageIDs = [
         "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "it", "pt", "ru",
@@ -124,10 +126,10 @@ final class AppModel: ObservableObject {
 
         let transcriber = SpeechTranscriber(recognizer: recognizer)
         transcriber.onPartial = { [weak self] text in
-            MainActor.assumeIsolated { self?.received(text) }
+            MainActor.assumeIsolated { self?.received(text, isFinal: false) }
         }
         transcriber.onFinal = { [weak self] text in
-            MainActor.assumeIsolated { self?.received(text) }
+            MainActor.assumeIsolated { self?.received(text, isFinal: true) }
         }
         capture.onAudio = { [transcriber] buffer in transcriber.append(buffer) }
         capture.onStop = { [weak self] error in
@@ -156,6 +158,7 @@ final class AppModel: ObservableObject {
         transcriber = nil
         await capture.stop()
         clearTask?.cancel()
+        committed = 0
         originalText = ""
         translatedText = ""
         status = "대기 중"
@@ -163,15 +166,47 @@ final class AppModel: ObservableObject {
 
     // MARK: Subtitles
 
-    private func received(_ text: String) {
+    /// Subtitles advance one finished sentence at a time, so the text on screen never rewrites itself
+    /// while the recognizer is still revising its guess.
+    private func received(_ text: String, isFinal: Bool) {
         guard isRunning else { return }
-        originalText = text
-        if needsTranslation {
-            // Only the newest pending text is kept, so translation never falls behind the audio.
-            requests?.yield(text)
-        } else {
-            translatedText = text
+        let characters = Array(text)
+        let end = isFinal ? characters.count : Self.lastSentenceEnd(in: characters)
+        if end > committed {
+            let sentence = String(characters[committed..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            committed = end
+            if !sentence.isEmpty { emit(sentence) }
         }
+        if isFinal { committed = 0 }
+    }
+
+    /// Index just past the last sentence terminator that already has more speech after it.
+    /// Waiting for the following words keeps a sentence from being cut at punctuation the recognizer later revises.
+    private static func lastSentenceEnd(in characters: [Character]) -> Int {
+        var hasTextAfter = false
+        for index in characters.indices.reversed() {
+            let character = characters[index]
+            if hasTextAfter {
+                if "。？！?!".contains(character) { return index + 1 }
+                // A period only ends a sentence when followed by a space ("3.5" and "U.S.A" don't).
+                if character == ".", characters[index + 1].isWhitespace { return index + 1 }
+            }
+            if !character.isWhitespace { hasTextAfter = true }
+        }
+        return 0
+    }
+
+    private func emit(_ sentence: String) {
+        if needsTranslation {
+            requests?.yield(sentence)
+        } else {
+            show(original: sentence, translated: sentence)
+        }
+    }
+
+    private func show(original: String, translated: String) {
+        originalText = original
+        translatedText = translated
         scheduleClear()
     }
 
@@ -190,14 +225,13 @@ final class AppModel: ObservableObject {
         // Offers to download the language pair if it isn't installed yet.
         try? await session.prepareTranslation()
 
-        let (stream, continuation) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let (stream, continuation) = AsyncStream<String>.makeStream()
         requests = continuation
         for await text in stream {
             do {
                 let response = try await session.translate(text)
                 guard isRunning else { continue }
-                translatedText = response.targetText
-                scheduleClear()
+                show(original: text, translated: response.targetText)
             } catch {
                 if Task.isCancelled { break }
                 status = "번역 오류: \(error.localizedDescription)"
