@@ -98,6 +98,9 @@ final class SpeechTranscriber: @unchecked Sendable {
     private static func describe(_ error: Error) -> String? {
         let error = error as NSError
         if error.domain == "kAFAssistantErrorDomain", [216, 301, 1110].contains(error.code) { return nil }
+        if error.domain == "kLSRErrorDomain", error.code == 201 {
+            return "받아쓰기가 꺼져 있어 음성을 인식할 수 없습니다. 시스템 설정 > 키보드 > 받아쓰기를 켜 주세요."
+        }
         return "\(error.localizedDescription) (\(error.domain) \(error.code))"
     }
 
