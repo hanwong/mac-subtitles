@@ -28,6 +28,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var translatedText = ""
     /// What the recognizer currently hears, shown in the settings window so a silent overlay can be diagnosed.
     @Published private(set) var heardText = ""
+    /// Loudest captured sample over the last half second; nil until audio buffers start arriving.
+    @Published private(set) var audioLevel: Float?
+    @Published private(set) var recognitionError = ""
 
     let sourceOptions: [LanguageOption]
     let targetOptions: [LanguageOption]
@@ -133,7 +136,16 @@ final class AppModel: ObservableObject {
         transcriber.onFinal = { [weak self] text in
             MainActor.assumeIsolated { self?.received(text, isFinal: true) }
         }
+        transcriber.onError = { [weak self] message in
+            MainActor.assumeIsolated { self?.recognitionError = message }
+        }
         capture.onAudio = { [transcriber] buffer in transcriber.append(buffer) }
+        capture.onLevel = { [weak self] level in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.audioLevel = level
+            }
+        }
         capture.onStop = { [weak self] error in
             Task { @MainActor in
                 guard let self, self.isRunning else { return }
@@ -162,6 +174,8 @@ final class AppModel: ObservableObject {
         clearTask?.cancel()
         committed = 0
         heardText = ""
+        audioLevel = nil
+        recognitionError = ""
         originalText = ""
         translatedText = ""
         status = "대기 중"
@@ -174,6 +188,7 @@ final class AppModel: ObservableObject {
     private func received(_ text: String, isFinal: Bool) {
         guard isRunning else { return }
         heardText = text
+        recognitionError = ""
         let characters = Array(text)
         // The recognizer sometimes starts its transcript over mid-segment.
         if characters.count < committed { committed = 0 }

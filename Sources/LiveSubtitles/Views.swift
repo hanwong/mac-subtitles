@@ -32,6 +32,16 @@ struct ControlView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if model.isRunning {
+                    LabeledContent("오디오 입력", value: audioInputDescription)
+                    if !model.recognitionError.isEmpty {
+                        LabeledContent("인식 오류") {
+                            Text(model.recognitionError)
+                                .font(.callout)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
                     LabeledContent("인식된 음성") {
                         Text(model.heardText.isEmpty ? "(아직 없음)" : model.heardText)
                             .font(.callout)
@@ -48,6 +58,14 @@ struct ControlView: View {
         .translationTask(model.translationConfiguration) { session in
             await model.runTranslation(with: session)
         }
+    }
+}
+
+extension ControlView {
+    /// Tells apart "no audio is reaching the app" from "audio arrives but nothing is recognized".
+    fileprivate var audioInputDescription: String {
+        guard let level = model.audioLevel else { return "수신 안 됨" }
+        return level < 0.001 ? "무음" : "소리 감지됨 (\(Int((level * 100).rounded()))%)"
     }
 }
 

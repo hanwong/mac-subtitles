@@ -12,6 +12,8 @@ final class SpeechTranscriber: @unchecked Sendable {
     var onPartial: ((String) -> Void)?
     /// Final text of a finished segment.
     var onFinal: ((String) -> Void)?
+    /// A recognition task failed. Running out of speech to recognize is not reported.
+    var onError: ((String) -> Void)?
 
     private static let pauseToEndSegment: TimeInterval = 1.0
     private static let maxSegmentDuration: TimeInterval = 15
@@ -70,8 +72,9 @@ final class SpeechTranscriber: @unchecked Sendable {
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let ended = error != nil || result?.isFinal == true
+            let failure = error.flatMap(Self.describe)
             DispatchQueue.main.async {
-                self?.handle(generation: generation, text: text, ended: ended)
+                self?.handle(generation: generation, text: text, ended: ended, failure: failure)
             }
         }
         lock.lock()
@@ -91,7 +94,14 @@ final class SpeechTranscriber: @unchecked Sendable {
         text = ""
     }
 
-    private func handle(generation: Int, text newText: String?, ended: Bool) {
+    /// Nil for the errors that are part of normal operation: silence and our own cancellations.
+    private static func describe(_ error: Error) -> String? {
+        let error = error as NSError
+        if error.domain == "kAFAssistantErrorDomain", [216, 301, 1110].contains(error.code) { return nil }
+        return "\(error.localizedDescription) (\(error.domain) \(error.code))"
+    }
+
+    private func handle(generation: Int, text newText: String?, ended: Bool, failure: String?) {
         // Late results from a segment that was already rotated out are dropped.
         guard running, generation == self.generation else { return }
         if let newText, !newText.isEmpty, newText != text {
@@ -100,6 +110,7 @@ final class SpeechTranscriber: @unchecked Sendable {
             onPartial?(newText)
         }
         guard ended else { return }
+        if let failure { onError?(failure) }
         let age = Date().timeIntervalSince(segmentStart)
         endSegment()
         if age < 0.5 {
