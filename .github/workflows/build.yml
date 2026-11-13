@@ -1,0 +1,17 @@
+name: Build
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app bundle
+        run: ./scripts/build-app.sh
+      - name: Zip
+        run: ditto -c -k --keepParent build/LiveSubtitles.app LiveSubtitles.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiveSubtitles
+          path: LiveSubtitles.zip
