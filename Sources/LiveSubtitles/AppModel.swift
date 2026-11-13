@@ -26,6 +26,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var status = "대기 중"
     @Published private(set) var originalText = ""
     @Published private(set) var translatedText = ""
+    /// What the recognizer currently hears, shown in the settings window so a silent overlay can be diagnosed.
+    @Published private(set) var heardText = ""
 
     let sourceOptions: [LanguageOption]
     let targetOptions: [LanguageOption]
@@ -159,6 +161,7 @@ final class AppModel: ObservableObject {
         await capture.stop()
         clearTask?.cancel()
         committed = 0
+        heardText = ""
         originalText = ""
         translatedText = ""
         status = "대기 중"
@@ -170,7 +173,10 @@ final class AppModel: ObservableObject {
     /// while the recognizer is still revising its guess.
     private func received(_ text: String, isFinal: Bool) {
         guard isRunning else { return }
+        heardText = text
         let characters = Array(text)
+        // The recognizer sometimes starts its transcript over mid-segment.
+        if characters.count < committed { committed = 0 }
         let end = isFinal ? characters.count : Self.lastSentenceEnd(in: characters)
         if end > committed {
             let sentence = String(characters[committed..<end]).trimmingCharacters(in: .whitespacesAndNewlines)

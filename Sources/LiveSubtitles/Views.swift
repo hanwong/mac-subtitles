@@ -31,6 +31,15 @@ struct ControlView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.isRunning {
+                    LabeledContent("인식된 음성") {
+                        Text(model.heardText.isEmpty ? "(아직 없음)" : model.heardText)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.head)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
