@@ -14,12 +14,15 @@ enum AudioCaptureError: LocalizedError {
 
 /// Captures all system audio output (every app except this one) via ScreenCaptureKit.
 final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-    /// Called on a background queue for every audio buffer.
-    var onAudio: ((CMSampleBuffer) -> Void)?
+    /// Called on a background queue with each batch of samples (mono, `sampleRate` Hz, -1...1).
+    var onAudio: (([Float]) -> Void)?
     /// Called on a background queue about twice a second with the loudest sample (0...1) since the last call.
     var onLevel: ((Float) -> Void)?
     /// Called on a background queue when the stream stops unexpectedly.
     var onStop: ((Error) -> Void)?
+
+    /// The rate Whisper expects, so no resampling is needed.
+    static let sampleRate = 16_000
 
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "LiveSubtitles.AudioCapture")
@@ -34,7 +37,7 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.excludesCurrentProcessAudio = true
-        config.sampleRate = 48_000
+        config.sampleRate = Self.sampleRate
         config.channelCount = 1
         // Video is mandatory for an SCStream; keep it as cheap as possible.
         config.width = 2
@@ -58,9 +61,11 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
-        onAudio?(sampleBuffer)
+        let samples = Self.samples(of: sampleBuffer)
+        guard !samples.isEmpty else { return }
+        onAudio?(samples)
 
-        peak = max(peak, Self.peak(of: sampleBuffer))
+        peak = max(peak, samples.reduce(0) { max($0, abs($1)) })
         let now = Date()
         if now.timeIntervalSince(lastLevelReport) >= 0.5 {
             onLevel?(peak)
@@ -69,20 +74,16 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         }
     }
 
-    /// Loudest sample in the buffer. ScreenCaptureKit delivers 32-bit float PCM.
-    private static func peak(of sampleBuffer: CMSampleBuffer) -> Float {
-        guard let block = sampleBuffer.dataBuffer else { return 0 }
-        var length = 0
-        var pointer: UnsafeMutablePointer<CChar>?
-        let status = CMBlockBufferGetDataPointer(
-            block, atOffset: 0, lengthAtOffsetOut: &length, totalLengthOut: nil, dataPointerOut: &pointer)
-        guard status == kCMBlockBufferNoErr, let pointer else { return 0 }
-        let count = length / MemoryLayout<Float>.size
-        return pointer.withMemoryRebound(to: Float.self, capacity: count) { samples in
-            var peak: Float = 0
-            for index in 0..<count { peak = max(peak, abs(samples[index])) }
-            return peak
+    /// ScreenCaptureKit delivers 32-bit float PCM, one plane per channel; the first plane is all we need.
+    private static func samples(of sampleBuffer: CMSampleBuffer) -> [Float] {
+        guard let block = sampleBuffer.dataBuffer else { return [] }
+        let count = min(sampleBuffer.numSamples, CMBlockBufferGetDataLength(block) / MemoryLayout<Float>.size)
+        guard count > 0 else { return [] }
+        var samples = [Float](repeating: 0, count: count)
+        let status = samples.withUnsafeMutableBytes { bytes in
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: bytes.baseAddress!)
         }
+        return status == kCMBlockBufferNoErr ? samples : []
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

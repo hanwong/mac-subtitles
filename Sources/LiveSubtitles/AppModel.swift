@@ -1,7 +1,7 @@
 import Foundation
-import Speech
 import SwiftUI
 import Translation
+import WhisperKit
 
 struct LanguageOption: Identifiable, Hashable {
     let id: String
@@ -11,10 +11,12 @@ struct LanguageOption: Identifiable, Hashable {
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
+    static let automatic = "auto"
 
     // MARK: Settings
 
-    @Published var sourceLocaleID: String { didSet { save(sourceLocaleID, "sourceLocale") } }
+    /// Whisper language code of the audio, or `automatic` to detect it utterance by utterance.
+    @Published var audioLanguageID: String { didSet { save(audioLanguageID, "audioLanguage") } }
     @Published var targetLanguageID: String { didSet { save(targetLanguageID, "targetLanguage") } }
     @Published var fontSize: Double { didSet { save(fontSize, "fontSize") } }
     @Published var showOriginal: Bool { didSet { save(showOriginal, "showOriginal") } }
@@ -26,46 +28,53 @@ final class AppModel: ObservableObject {
     @Published private(set) var status = "대기 중"
     @Published private(set) var originalText = ""
     @Published private(set) var translatedText = ""
-    /// What the recognizer currently hears, shown in the settings window so a silent overlay can be diagnosed.
+    /// The latest recognized speech, shown in the settings window so a silent overlay can be diagnosed.
     @Published private(set) var heardText = ""
     /// Loudest captured sample over the last half second; nil until audio buffers start arriving.
     @Published private(set) var audioLevel: Float?
     @Published private(set) var recognitionError = ""
+    /// Spoken languages (Whisper codes) that need a translation session; the settings window keeps one open for each.
+    @Published private(set) var translationSources: [String] = []
 
-    let sourceOptions: [LanguageOption]
+    let audioOptions: [LanguageOption]
     let targetOptions: [LanguageOption]
 
     private let capture = AudioCapture()
-    private var transcriber: SpeechTranscriber?
-    private var requests: AsyncStream<String>.Continuation?
+    private var whisper: WhisperKit?
+    private var transcriber: WhisperTranscriber?
     private var clearTask: Task<Void, Never>?
-    /// Number of characters of the segment in progress that were already shown as sentences.
-    private var committed = 0
-    /// Words of an unfinished sentence left over when a segment ended, waiting to be joined with what comes next.
-    private var pending = ""
-    private var flushTask: Task<Void, Never>?
 
+    /// Open translation sessions by spoken language. The id tells a restarted session's stream from the one it replaced.
+    private var streams: [String: (id: Int, continuation: AsyncStream<String>.Continuation)] = [:]
+    private var nextStreamID = 0
+    /// Speech waiting for its language's translation session to come up.
+    private var backlog: [String: [String]] = [:]
+    private var checking: Set<String> = []
+    private var untranslatable: Set<String> = []
+
+    private static let audioLanguageIDs = [
+        "en", "ko", "ja", "zh", "es", "fr", "de", "it", "pt", "ru",
+        "ar", "hi", "id", "th", "vi", "tr", "pl", "nl", "uk",
+    ]
     private static let targetLanguageIDs = [
         "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "it", "pt", "ru",
         "ar", "hi", "id", "th", "vi", "tr", "pl", "nl", "uk",
     ]
     /// How long a subtitle stays on screen after the audio goes quiet.
     private static let subtitleLifetime: Duration = .seconds(6)
-    /// How long an unfinished sentence waits for the speaker to continue before it is shown as is.
-    private static let pendingLifetime: Duration = .seconds(2)
-    private static let maxPendingLength = 150
+    private static let maxBacklog = 3
 
     private init() {
         let defaults = UserDefaults.standard
         let display = Locale.current
-        sourceOptions = SFSpeechRecognizer.supportedLocales()
-            .map { LanguageOption(id: $0.identifier, name: display.localizedString(forIdentifier: $0.identifier) ?? $0.identifier) }
-            .sorted { $0.name < $1.name }
-        targetOptions = Self.targetLanguageIDs
-            .map { LanguageOption(id: $0, name: display.localizedString(forIdentifier: $0) ?? $0) }
+        func option(_ id: String) -> LanguageOption {
+            LanguageOption(id: id, name: display.localizedString(forIdentifier: id) ?? id)
+        }
+        audioOptions = [LanguageOption(id: Self.automatic, name: "자동 감지")] + Self.audioLanguageIDs.map(option)
+        targetOptions = Self.targetLanguageIDs.map(option)
 
-        let savedSource = defaults.string(forKey: "sourceLocale") ?? "en-US"
-        sourceLocaleID = sourceOptions.contains { $0.id == savedSource } ? savedSource : (sourceOptions.first?.id ?? "en-US")
+        let savedAudio = defaults.string(forKey: "audioLanguage") ?? Self.automatic
+        audioLanguageID = audioOptions.contains { $0.id == savedAudio } ? savedAudio : Self.automatic
         targetLanguageID = defaults.string(forKey: "targetLanguage") ?? "ko"
         fontSize = defaults.object(forKey: "fontSize") as? Double ?? 32
         showOriginal = defaults.bool(forKey: "showOriginal")
@@ -77,29 +86,22 @@ final class AppModel: ObservableObject {
 
     // MARK: Languages
 
-    /// The spoken language, in the form the Translation framework expects.
-    private var sourceLanguage: Locale.Language {
-        let language = Locale(identifier: sourceLocaleID).language
-        guard let code = language.languageCode else { return language }
-        if code == .chinese {
-            let traditional = ["TW", "HK", "MO"].contains(language.region?.identifier ?? "")
-            return Locale.Language(languageCode: code, script: traditional ? .hanTraditional : .hanSimplified)
-        }
-        return Locale.Language(languageCode: code)
-    }
-
     private var targetLanguage: Locale.Language {
         Locale.Language(identifier: targetLanguageID)
     }
 
-    private var needsTranslation: Bool {
-        let source = sourceLanguage, target = targetLanguage
-        return source.languageCode != target.languageCode || source.script != target.script
+    /// A Whisper language code in the form the Translation framework expects.
+    private func language(for source: String) -> Locale.Language {
+        Locale.Language(identifier: source == "zh" ? "zh-Hans" : source)
     }
 
-    /// Nil when the spoken and subtitle languages are the same (plain captions, no translation).
-    var translationConfiguration: TranslationSession.Configuration? {
-        needsTranslation ? .init(source: sourceLanguage, target: targetLanguage) : nil
+    private func isTargetLanguage(_ source: String) -> Bool {
+        language(for: source).languageCode == targetLanguage.languageCode
+    }
+
+    /// Nil when that language is already the subtitle language (plain captions, no translation).
+    func translationConfiguration(from source: String) -> TranslationSession.Configuration? {
+        isTargetLanguage(source) ? nil : .init(source: language(for: source), target: targetLanguage)
     }
 
     // MARK: Start / stop
@@ -116,36 +118,23 @@ final class AppModel: ObservableObject {
         isStarting = true
         defer { isStarting = false }
 
-        let authorization = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-        }
-        guard authorization == .authorized else {
-            status = "음성 인식 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안 > 음성 인식에서 허용해 주세요."
+        let whisper: WhisperKit
+        do {
+            whisper = try await loadWhisper()
+        } catch {
+            status = "음성 인식 모델을 준비하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요. (\(error.localizedDescription))"
             return
-        }
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: sourceLocaleID)), recognizer.isAvailable else {
-            status = "선택한 언어의 음성 인식을 지금 사용할 수 없습니다."
-            return
-        }
-        if needsTranslation {
-            let availability = await LanguageAvailability().status(from: sourceLanguage, to: targetLanguage)
-            if availability == .unsupported {
-                status = "이 언어 조합은 번역이 지원되지 않습니다."
-                return
-            }
         }
 
-        let transcriber = SpeechTranscriber(recognizer: recognizer)
-        transcriber.onPartial = { [weak self] text in
-            MainActor.assumeIsolated { self?.received(text, isFinal: false) }
-        }
-        transcriber.onFinal = { [weak self] text in
-            MainActor.assumeIsolated { self?.received(text, isFinal: true) }
+        let transcriber = WhisperTranscriber(
+            whisper: whisper, language: audioLanguageID == Self.automatic ? nil : audioLanguageID)
+        transcriber.onUtterance = { [weak self] utterance in
+            MainActor.assumeIsolated { self?.received(utterance) }
         }
         transcriber.onError = { [weak self] message in
             MainActor.assumeIsolated { self?.recognitionError = message }
         }
-        capture.onAudio = { [transcriber] buffer in transcriber.append(buffer) }
+        capture.onAudio = { [transcriber] samples in transcriber.append(samples) }
         capture.onLevel = { [weak self] level in
             Task { @MainActor in
                 guard let self, self.isRunning else { return }
@@ -169,7 +158,41 @@ final class AppModel: ObservableObject {
         transcriber.start()
         self.transcriber = transcriber
         isRunning = true
-        status = recognizer.supportsOnDeviceRecognition ? "듣는 중 (온디바이스 인식)" : "듣는 중 (서버 인식)"
+        status = "듣는 중"
+    }
+
+    /// Downloads the Whisper model on first use (several hundred MB) and loads it; later calls reuse it.
+    private func loadWhisper() async throws -> WhisperKit {
+        if let whisper { return whisper }
+
+        let model = WhisperKit.recommendedModels().default
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LiveSubtitles", isDirectory: true)
+        let folderKey = "whisperModelFolder.\(model)"
+
+        var folder = UserDefaults.standard.string(forKey: folderKey)
+        if folder.map(FileManager.default.fileExists(atPath:)) != true {
+            status = "음성 인식 모델 다운로드 중…"
+            let url = try await WhisperKit.download(variant: model, downloadBase: base) { progress in
+                let percent = Int(progress.fractionCompleted * 100)
+                Task { @MainActor [weak self] in self?.status = "음성 인식 모델 다운로드 중… \(percent)%" }
+            }
+            folder = url.path
+            UserDefaults.standard.set(url.path, forKey: folderKey)
+        }
+
+        status = "음성 인식 모델 불러오는 중… (처음에는 몇 분 걸릴 수 있습니다)"
+        do {
+            let whisper = try await WhisperKit(WhisperKitConfig(
+                model: model, downloadBase: base, modelFolder: folder, verbose: false, prewarm: false, load: true,
+                download: false))
+            self.whisper = whisper
+            return whisper
+        } catch {
+            // Possibly an incomplete download; fetch it again next time.
+            UserDefaults.standard.removeObject(forKey: folderKey)
+            throw error
+        }
     }
 
     private func stop() async {
@@ -178,9 +201,7 @@ final class AppModel: ObservableObject {
         transcriber = nil
         await capture.stop()
         clearTask?.cancel()
-        flushTask?.cancel()
-        committed = 0
-        pending = ""
+        backlog = [:]
         heardText = ""
         audioLevel = nil
         recognitionError = ""
@@ -191,82 +212,37 @@ final class AppModel: ObservableObject {
 
     // MARK: Subtitles
 
-    /// Subtitles advance one finished sentence at a time, so the text on screen never rewrites itself
-    /// while the recognizer is still revising its guess.
-    private func received(_ text: String, isFinal: Bool) {
+    private func received(_ utterance: WhisperTranscriber.Utterance) {
         guard isRunning else { return }
+        let text = utterance.text, source = utterance.language
         heardText = text
         recognitionError = ""
-        flushTask?.cancel()
 
-        let characters = Array(text)
-        // The recognizer sometimes starts its transcript over mid-segment.
-        if characters.count < committed { committed = 0 }
-        let end = Self.lastSentenceEnd(in: characters, requiringTextAfter: !isFinal)
-        if end > committed {
-            emit(joined(pending, String(characters[committed..<end])))
-            pending = ""
-            committed = end
+        if isTargetLanguage(source) || untranslatable.contains(source) {
+            show(original: text, translated: text)
+            return
         }
-        guard isFinal else { return }
+        if let stream = streams[source] {
+            stream.continuation.yield(text)
+            return
+        }
 
-        // The segment ended mid-sentence (a breath, or the length limit). Hold the words back and
-        // translate them together with whatever comes next, instead of as a fragment on their own.
-        let carriedOver = !pending.isEmpty
-        pending = joined(pending, String(characters[committed...]))
-        committed = 0
-        guard !pending.isEmpty else { return }
-        if carriedOver || pending.count > Self.maxPendingLength {
-            flushPending()
-        } else {
-            flushTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.pendingLifetime)
-                guard !Task.isCancelled else { return }
-                self?.flushPending()
+        backlog[source] = Array(((backlog[source] ?? []) + [text]).suffix(Self.maxBacklog))
+        guard !translationSources.contains(source), !checking.contains(source) else { return }
+        // A language heard once in the middle of another is usually a misdetection; wait for a second utterance.
+        if !translationSources.isEmpty, backlog[source]?.count == 1 { return }
+
+        checking.insert(source)
+        Task {
+            let availability = await LanguageAvailability().status(from: language(for: source), to: targetLanguage)
+            checking.remove(source)
+            if availability == .unsupported {
+                // Better the original words than nothing.
+                untranslatable.insert(source)
+                for text in backlog.removeValue(forKey: source) ?? [] { show(original: text, translated: text) }
+            } else {
+                translationSources.append(source)
             }
-        }
-    }
-
-    private func flushPending() {
-        flushTask?.cancel()
-        let sentence = pending
-        pending = ""
-        emit(sentence)
-    }
-
-    private func joined(_ first: String, _ second: String) -> String {
-        let first = first.trimmingCharacters(in: .whitespacesAndNewlines)
-        let second = second.trimmingCharacters(in: .whitespacesAndNewlines)
-        if first.isEmpty || second.isEmpty { return first + second }
-        let unspaced: [Locale.LanguageCode] = [.japanese, .chinese, .thai]
-        let separator = sourceLanguage.languageCode.map(unspaced.contains) == true ? "" : " "
-        return first + separator + second
-    }
-
-    /// Index just past the last sentence terminator. While the segment is still in progress the terminator
-    /// must already have more speech after it, so a sentence isn't cut at punctuation the recognizer later revises.
-    private static func lastSentenceEnd(in characters: [Character], requiringTextAfter: Bool) -> Int {
-        var canEnd = !requiringTextAfter
-        for index in characters.indices.reversed() {
-            let character = characters[index]
-            if canEnd {
-                if "。？！?!".contains(character) { return index + 1 }
-                // A period only ends a sentence at the end or before a space ("3.5" and "U.S.A" don't).
-                if character == ".", index + 1 == characters.count || characters[index + 1].isWhitespace {
-                    return index + 1
-                }
-            }
-            if !character.isWhitespace { canEnd = true }
-        }
-        return 0
-    }
-
-    private func emit(_ sentence: String) {
-        guard !sentence.isEmpty else { return }
-        if needsTranslation {
-            requests?.yield(sentence)
-        } else {
-            show(original: sentence, translated: sentence)
         }
     }
 
@@ -286,13 +262,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Runs for as long as the translation session provided by SwiftUI is valid.
-    func runTranslation(with session: TranslationSession) async {
+    /// Translates everything spoken in one language, for as long as the session SwiftUI provided is valid.
+    func runTranslation(with session: TranslationSession, from source: String) async {
         // Offers to download the language pair if it isn't installed yet.
         try? await session.prepareTranslation()
 
         let (stream, continuation) = AsyncStream<String>.makeStream()
-        requests = continuation
+        nextStreamID += 1
+        let id = nextStreamID
+        streams[source] = (id, continuation)
+        defer { if streams[source]?.id == id { streams[source] = nil } }
+        for text in backlog.removeValue(forKey: source) ?? [] { continuation.yield(text) }
+
         for await text in stream {
             do {
                 let response = try await session.translate(text)
@@ -300,7 +281,7 @@ final class AppModel: ObservableObject {
                 show(original: text, translated: response.targetText)
             } catch {
                 if Task.isCancelled { break }
-                status = "번역 오류: \(error.localizedDescription)"
+                recognitionError = "번역 오류: \(error.localizedDescription)"
             }
         }
     }

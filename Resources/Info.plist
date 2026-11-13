@@ -22,7 +22,5 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>재생 중인 오디오의 음성을 텍스트로 변환해 자막을 만들기 위해 음성 인식을 사용합니다.</string>
 </dict>
 </plist>

@@ -7,8 +7,8 @@ struct ControlView: View {
 
     var body: some View {
         Form {
-            Picker("오디오 언어", selection: $model.sourceLocaleID) {
-                ForEach(model.sourceOptions) { Text($0.name).tag($0.id) }
+            Picker("오디오 언어", selection: $model.audioLanguageID) {
+                ForEach(model.audioOptions) { Text($0.name).tag($0.id) }
             }
             .disabled(model.isRunning || model.isStarting)
 
@@ -34,7 +34,7 @@ struct ControlView: View {
                 if model.isRunning {
                     LabeledContent("오디오 입력", value: audioInputDescription)
                     if !model.recognitionError.isEmpty {
-                        LabeledContent("인식 오류") {
+                        LabeledContent("오류") {
                             Text(model.recognitionError)
                                 .font(.callout)
                                 .foregroundStyle(.red)
@@ -55,8 +55,13 @@ struct ControlView: View {
         .formStyle(.grouped)
         .frame(width: 400)
         .fixedSize(horizontal: false, vertical: true)
-        .translationTask(model.translationConfiguration) { session in
-            await model.runTranslation(with: session)
+        // One translation session per spoken language, kept alive by this window.
+        .background {
+            ForEach(model.translationSources, id: \.self) { source in
+                Color.clear.translationTask(model.translationConfiguration(from: source)) { session in
+                    await model.runTranslation(with: session, from: source)
+                }
+            }
         }
     }
 }
