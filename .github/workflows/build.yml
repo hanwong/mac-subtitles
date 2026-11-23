@@ -5,13 +5,24 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - { dir: live-subtitles, name: LiveSubtitles }
+          - { dir: hey-mac, name: HeyMac }
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app.dir }}
     steps:
       - uses: actions/checkout@v4
+      - name: Test
+        run: if [ -d Tests ]; then swift test; fi
       - name: Build app bundle
         run: ./scripts/build-app.sh
       - name: Zip
-        run: ditto -c -k --keepParent build/LiveSubtitles.app LiveSubtitles.zip
+        run: ditto -c -k --keepParent build/${{ matrix.app.name }}.app ${{ matrix.app.name }}.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: LiveSubtitles
-          path: LiveSubtitles.zip
+          name: ${{ matrix.app.name }}
+          path: apps/${{ matrix.app.dir }}/${{ matrix.app.name }}.zip
