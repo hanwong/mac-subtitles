@@ -78,6 +78,16 @@ final class SpeechListener: @unchecked Sendable {
         input.removeTap(onBus: 0)
         engine.stop()
 
+        // Echo cancellation: macOS subtracts whatever the Mac itself is playing from the microphone signal,
+        // so a video or music coming out of the speakers isn't heard as speech.
+        if !input.isVoiceProcessingEnabled {
+            try? input.setVoiceProcessingEnabled(true)
+        }
+        if input.isVoiceProcessingEnabled {
+            // Voice processing turns other apps' audio down by default, as in a call. Keep that to a minimum.
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0,
             let outputFormat = AVAudioFormat(
@@ -87,6 +97,8 @@ final class SpeechListener: @unchecked Sendable {
             throw NSError(
                 domain: "HeyMac", code: 1, userInfo: [NSLocalizedDescriptionKey: "사용할 수 있는 마이크가 없습니다."])
         }
+        // With voice processing the microphone array can show up as several channels; the first is the processed voice.
+        if inputFormat.channelCount > 1 { converter.channelMap = [0] }
         self.converter = converter
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             self?.process(buffer, to: outputFormat)
