@@ -111,12 +111,17 @@ enum SystemController {
 
     // MARK: Keys
 
-    private static let accessibilityHint = "키 입력을 보내려면 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 Hey Mac을 허용해 주세요"
+    private static let accessibilityHint = "손쉬운 사용 권한이 필요해요. 이미 켜져 있다면 목록에서 Hey Mac을 지우고 다시 추가해 주세요"
 
-    /// Whether the app may post key events. Asks the user (once per launch, by macOS) when it may not.
+    private static var askedForAccessibility = false
+
+    /// Whether the app may post key events. The first time it may not, macOS asks the user; after that the
+    /// answer is only checked, so a command that needs the permission doesn't raise the dialog over and over.
     @discardableResult
     static func ensureAccessibility(prompt: Bool = true) -> Bool {
-        let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
+        let shouldPrompt = prompt && !askedForAccessibility
+        if shouldPrompt { askedForAccessibility = true }
+        let options = ["AXTrustedCheckOptionPrompt": shouldPrompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 

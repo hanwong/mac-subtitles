@@ -63,8 +63,11 @@ struct MenuView: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
+                    Text("이미 켜져 있는데도 이 안내가 보이면, 앱을 새로 빌드해 서명이 바뀐 것입니다. 목록에서 Hey Mac을 −로 지운 뒤 다시 추가해 주세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button("손쉬운 사용 설정 열기") {
-                        SystemController.ensureAccessibility()
                         NSWorkspace.shared.open(
                             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
                     }
