@@ -13,13 +13,13 @@ final class SpeechListener: @unchecked Sendable {
     private static let sampleRate = 16_000
     /// Loudness is judged in 0.1 s frames.
     private static let frameLength = sampleRate / 10
-    private static let minThreshold: Float = 0.008
+    private static let minThreshold: Float = 0.005
     /// Speech has to be this many times louder than the room's background noise.
-    private static let noiseMargin: Float = 3
-    private static let pauseFrames = 6
+    private static let noiseMargin: Float = 2.5
+    private static let pauseFrames = 7
     private static let minSpeechFrames = 3
     private static let maxFrames = 80
-    private static let leadInFrames = 3
+    private static let leadInFrames = 5
 
     private let whisper: WhisperKit
     private let options: DecodingOptions
@@ -38,12 +38,20 @@ final class SpeechListener: @unchecked Sendable {
     private var quietFrames = 0
     private var noiseFloor: Float = 0.002
 
-    /// - Parameter language: Whisper language code the commands are spoken in.
-    init(whisper: WhisperKit, language: String) {
+    /// - Parameters:
+    ///   - language: Whisper language code the commands are spoken in.
+    ///   - hint: Typical things the user says. Whisper treats it as preceding context, which makes it far
+    ///     more likely to hear the wake word and command words as written here rather than as sound-alikes.
+    init(whisper: WhisperKit, language: String, hint: String) {
         self.whisper = whisper
+        var promptTokens: [Int]?
+        if let tokenizer = whisper.tokenizer, !hint.isEmpty {
+            promptTokens = tokenizer.encode(text: " " + hint).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+        }
         // No timestamps and a single retry: commands are short, and a quick answer matters more.
         options = DecodingOptions(
-            language: language, temperatureFallbackCount: 1, skipSpecialTokens: true, withoutTimestamps: true)
+            language: language, temperatureFallbackCount: 1, skipSpecialTokens: true, withoutTimestamps: true,
+            promptTokens: promptTokens)
     }
 
     func start() throws {
@@ -173,7 +181,8 @@ final class SpeechListener: @unchecked Sendable {
 
     private func transcribe(_ samples: [Float]) async {
         do {
-            let result = try await whisper.transcribe(audioArray: samples, decodeOptions: options).first
+            let result = try await whisper.transcribe(audioArray: Self.normalized(samples), decodeOptions: options)
+                .first
             let text = Self.clean(result?.text ?? "")
             guard !text.isEmpty else { return }
             DispatchQueue.main.async { [weak self] in self?.onUtterance?(text) }
@@ -182,6 +191,14 @@ final class SpeechListener: @unchecked Sendable {
             let message = error.localizedDescription
             DispatchQueue.main.async { [weak self] in self?.onError?(message) }
         }
+    }
+
+    /// Brings quiet speech (a soft voice, or someone across the room) up to a level Whisper hears well.
+    private static func normalized(_ samples: [Float]) -> [Float] {
+        let peak = samples.reduce(0) { max($0, abs($1)) }
+        guard peak > 0.001 else { return samples }
+        let gain = min(0.9 / peak, 30)
+        return samples.map { $0 * gain }
     }
 
     /// Strips leftover control tokens and drops non-speech annotations such as "[Music]".

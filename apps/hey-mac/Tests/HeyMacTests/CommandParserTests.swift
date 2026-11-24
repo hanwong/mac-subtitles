@@ -74,3 +74,16 @@ extension CommandParserTests {
         XCTAssertEqual(CommandParser.textAfterWakeWord(in: "헤이 맥북 잠자기", wakeWords: words), "잠자기")
     }
 }
+
+extension CommandParserTests {
+    func testMisheardWakeWord() {
+        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "해이 맥 볼륨 올려줘", wakeWords: ["헤이 맥"]), "볼륨올려줘")
+        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "헤이 멕, 일시정지", wakeWords: ["헤이 맥"]), "일시정지")
+        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "에이 맥 잠자기", wakeWords: ["헤이 맥"]), "잠자기")
+        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "Hey Mark, pause", wakeWords: ["hey mac"]), "pause")
+        // Too far off, or not at the start.
+        XCTAssertNil(CommandParser.textAfterWakeWord(in: "오늘 날씨 어때", wakeWords: ["헤이 맥"]))
+        XCTAssertNil(CommandParser.textAfterWakeWord(in: "볼륨 올려줘 해이 맥", wakeWords: ["헤이 맥"]))
+        XCTAssertNil(CommandParser.textAfterWakeWord(in: "헬로 맥스", wakeWords: ["헤이 맥"]))
+    }
+}

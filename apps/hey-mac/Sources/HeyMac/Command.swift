@@ -40,8 +40,44 @@ enum CommandParser {
         let first = matches.min {
             $0.lowerBound != $1.lowerBound ? $0.lowerBound < $1.lowerBound : $0.upperBound > $1.upperBound
         }
-        guard let first else { return nil }
-        return String(text[first.upperBound...])
+        if let first { return String(text[first.upperBound...]) }
+        return textAfterMisheardWakeWord(in: text, wakeWords: wakeWords.map(compact))
+    }
+
+    /// The wake word is short and easily misheard ("해이 맥", "헤이 멕", "hey mack"). At the very start of
+    /// what was said, a near miss counts: at most one sound in four may differ.
+    private static func textAfterMisheardWakeWord(in text: String, wakeWords: [String]) -> String? {
+        var best: (distance: Int, length: Int)?
+        for wakeWord in wakeWords where wakeWord.count >= 3 {
+            let target = sounds(of: wakeWord)
+            let tolerance = target.count / 4
+            guard tolerance > 0 else { continue }
+            for length in max(1, wakeWord.count - 1)...wakeWord.count + 1 where length <= text.count {
+                let distance = editDistance(sounds(of: String(text.prefix(length))), target)
+                // On a tie the longer prefix wins, so "hey mark" doesn't leave "rk" in front of the command.
+                if distance <= tolerance, distance <= best?.distance ?? .max { best = (distance, length) }
+            }
+        }
+        return best.map { String(text.dropFirst($0.length)) }
+    }
+
+    /// Hangul syllables split into their consonants and vowels, so "헤" and "해" are one sound apart, not a whole letter.
+    private static func sounds(of text: String) -> [Unicode.Scalar] {
+        Array(text.decomposedStringWithCanonicalMapping.unicodeScalars)
+    }
+
+    private static func editDistance(_ first: [Unicode.Scalar], _ second: [Unicode.Scalar]) -> Int {
+        var row = Array(0...second.count)
+        for (i, a) in first.enumerated() {
+            var previous = row[0]
+            row[0] = i + 1
+            for (j, b) in second.enumerated() {
+                let substitution = previous + (a == b ? 0 : 1)
+                previous = row[j + 1]
+                row[j + 1] = min(substitution, row[j] + 1, row[j + 1] + 1)
+            }
+        }
+        return row[second.count]
     }
 
     static func parse(_ text: String) -> Command? {
