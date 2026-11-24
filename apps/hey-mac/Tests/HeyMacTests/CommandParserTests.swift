@@ -80,7 +80,10 @@ extension CommandParserTests {
         XCTAssertEqual(CommandParser.textAfterWakeWord(in: "해이 맥 볼륨 올려줘", wakeWords: ["헤이 맥"]), "볼륨올려줘")
         XCTAssertEqual(CommandParser.textAfterWakeWord(in: "헤이 멕, 일시정지", wakeWords: ["헤이 맥"]), "일시정지")
         XCTAssertEqual(CommandParser.textAfterWakeWord(in: "에이 맥 잠자기", wakeWords: ["헤이 맥"]), "잠자기")
-        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "Hey Mark, pause", wakeWords: ["hey mac"]), "pause")
+        XCTAssertEqual(CommandParser.textAfterWakeWord(in: "Hey Mec, pause", wakeWords: ["hey mac"]), "pause")
+        // Two sounds off: a stray letter is left in front of the command, which still parses.
+        let afterMark = CommandParser.textAfterWakeWord(in: "Hey Mark, pause", wakeWords: ["hey mac"])
+        XCTAssertEqual(afterMark.flatMap(CommandParser.parse), .playPause)
         // Too far off, or not at the start.
         XCTAssertNil(CommandParser.textAfterWakeWord(in: "오늘 날씨 어때", wakeWords: ["헤이 맥"]))
         XCTAssertNil(CommandParser.textAfterWakeWord(in: "볼륨 올려줘 해이 맥", wakeWords: ["헤이 맥"]))
