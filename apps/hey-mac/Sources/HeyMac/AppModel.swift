@@ -26,12 +26,7 @@ final class AppModel: ObservableObject {
     // MARK: Settings
 
     /// Comma-separated spellings of the wake word; the recognizer doesn't always write it the same way.
-    @Published var wakeWords: String {
-        didSet {
-            UserDefaults.standard.set(wakeWords, forKey: "wakeWords")
-            scheduleListenerRestart()
-        }
-    }
+    @Published var wakeWords: String { didSet { UserDefaults.standard.set(wakeWords, forKey: "wakeWords") } }
     @Published var languageID: String {
         didSet {
             UserDefaults.standard.set(languageID, forKey: "language")
@@ -52,7 +47,6 @@ final class AppModel: ObservableObject {
     private var listener: SpeechListener?
     private var armedUntil: Date?
     private var bannerTask: Task<Void, Never>?
-    private var restartTask: Task<Void, Never>?
 
     static let defaultWakeWords = "헤이 맥, 해이 맥, 하이 맥, 헤이 맥북, hey mac"
     /// How long after the wake word a command is still accepted.
@@ -68,18 +62,6 @@ final class AppModel: ObservableObject {
 
     private var wakeWordList: [String] {
         wakeWords.split(separator: ",").map(String.init)
-    }
-
-    /// Example requests in the command language, starting with the wake word as the user spells it.
-    private var recognitionHint: String {
-        let wakeWord = wakeWordList.first?.trimmingCharacters(in: .whitespaces) ?? ""
-        let examples: [String]
-        switch languageID {
-        case "ko": examples = ["볼륨 올려줘", "화면 밝기 낮춰줘", "일시정지", "다음 곡", "잠자기", "사파리 열어줘"]
-        case "en": examples = ["volume up", "brightness down", "pause", "next track", "go to sleep", "open Safari"]
-        default: examples = []
-        }
-        return ([wakeWord] + examples.map { "\(wakeWord), \($0)" }).joined(separator: ". ")
     }
 
     // MARK: Start
@@ -129,20 +111,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The wake word is part of the recognizer's hint, so editing it needs a restart; wait until typing stops.
-    private func scheduleListenerRestart() {
-        restartTask?.cancel()
-        restartTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled else { return }
-            self?.restartListener()
-        }
-    }
-
     private func restartListener() {
         guard let whisper else { return }
         listener?.stop()
-        let listener = SpeechListener(whisper: whisper, language: languageID, hint: recognitionHint)
+        let listener = SpeechListener(whisper: whisper, language: languageID)
         listener.onUtterance = { [weak self] text in
             MainActor.assumeIsolated { self?.heard(text) }
         }

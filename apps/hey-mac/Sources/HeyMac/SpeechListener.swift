@@ -13,12 +13,14 @@ final class SpeechListener: @unchecked Sendable {
     private static let sampleRate = 16_000
     /// Loudness is judged in 0.1 s frames.
     private static let frameLength = sampleRate / 10
-    private static let minThreshold: Float = 0.005
+    private static let minThreshold: Float = 0.008
     /// Speech has to be this many times louder than the room's background noise.
-    private static let noiseMargin: Float = 2.5
+    private static let noiseMargin: Float = 3
     private static let pauseFrames = 7
-    private static let minSpeechFrames = 3
+    private static let minSpeechFrames = 4
     private static let maxFrames = 80
+    private static let maxNoSpeechProbability: Float = 0.5
+    private static let minAverageLogProbability: Float = -0.9
     private static let leadInFrames = 5
 
     private let whisper: WhisperKit
@@ -38,20 +40,13 @@ final class SpeechListener: @unchecked Sendable {
     private var quietFrames = 0
     private var noiseFloor: Float = 0.002
 
-    /// - Parameters:
-    ///   - language: Whisper language code the commands are spoken in.
-    ///   - hint: Typical things the user says. Whisper treats it as preceding context, which makes it far
-    ///     more likely to hear the wake word and command words as written here rather than as sound-alikes.
-    init(whisper: WhisperKit, language: String, hint: String) {
+    /// - Parameter language: Whisper language code the commands are spoken in.
+    init(whisper: WhisperKit, language: String) {
         self.whisper = whisper
-        var promptTokens: [Int]?
-        if let tokenizer = whisper.tokenizer, !hint.isEmpty {
-            promptTokens = tokenizer.encode(text: " " + hint).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-        }
         // No timestamps and a single retry: commands are short, and a quick answer matters more.
+        // Deliberately no prompt with the wake word in it: on noise, Whisper tends to "hear" its own prompt.
         options = DecodingOptions(
-            language: language, temperatureFallbackCount: 1, skipSpecialTokens: true, withoutTimestamps: true,
-            promptTokens: promptTokens)
+            language: language, temperatureFallbackCount: 1, skipSpecialTokens: true, withoutTimestamps: true)
     }
 
     func start() throws {
@@ -183,7 +178,13 @@ final class SpeechListener: @unchecked Sendable {
         do {
             let result = try await whisper.transcribe(audioArray: Self.normalized(samples), decodeOptions: options)
                 .first
-            let text = Self.clean(result?.text ?? "")
+            // Whisper writes something even for a cough or a door closing. Its own confidence figures tell
+            // those guesses from real speech; a doubtful result is dropped rather than acted on.
+            let segments = result?.segments ?? []
+            let confident = !segments.isEmpty && segments.allSatisfy {
+                $0.noSpeechProb < Self.maxNoSpeechProbability && $0.avgLogprob > Self.minAverageLogProbability
+            }
+            let text = confident ? Self.clean(result?.text ?? "") : ""
             guard !text.isEmpty else { return }
             DispatchQueue.main.async { [weak self] in self?.onUtterance?(text) }
         } catch {
@@ -193,11 +194,12 @@ final class SpeechListener: @unchecked Sendable {
         }
     }
 
-    /// Brings quiet speech (a soft voice, or someone across the room) up to a level Whisper hears well.
+    /// Brings quiet speech up to a level Whisper hears well. The gain is capped, and faint sounds are left
+    /// alone, so that background noise isn't blown up into something that sounds like words.
     private static func normalized(_ samples: [Float]) -> [Float] {
         let peak = samples.reduce(0) { max($0, abs($1)) }
-        guard peak > 0.001 else { return samples }
-        let gain = min(0.9 / peak, 30)
+        guard peak > 0.02 else { return samples }
+        let gain = min(0.9 / peak, 8)
         return samples.map { $0 * gain }
     }
 
