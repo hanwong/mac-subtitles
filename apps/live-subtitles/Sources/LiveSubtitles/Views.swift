@@ -78,29 +78,24 @@ extension ControlView {
     }
 }
 
-/// Content of the click-through overlay pinned to the bottom of the screen: two stacked boxes, each with
-/// the words as spoken and, under them, the translation.
+/// Content of the click-through overlay pinned to the bottom of the screen: up to two stacked boxes, each
+/// with the words as spoken and, under them, the translation. The newest box is at the bottom.
 struct SubtitleView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(spacing: 8) {
             Spacer(minLength: 0)
-            if !model.captions.isEmpty {
-                ForEach(model.captions) { caption in
-                    CaptionBox(caption: caption, fontSize: model.fontSize)
-                        .transition(.opacity)
-                }
-                // Keeps the lower slot's room while it is empty, so the upper box doesn't drop down and
-                // jump back up between one utterance and the next.
-                if model.captions.count < AppModel.maxCaptions {
-                    CaptionBox(caption: Caption(id: -1, original: " ", translation: " "), fontSize: model.fontSize)
-                        .hidden()
-                }
+            ForEach(model.captions) { caption in
+                CaptionBox(caption: caption, fontSize: model.fontSize)
+                    // A new box comes up from below; the one it pushes out leaves through the top.
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.2), value: model.captions.map(\.id))
+        .animation(.easeInOut(duration: 0.25), value: model.captions.map(\.id))
     }
 }
 

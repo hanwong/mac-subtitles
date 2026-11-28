@@ -270,12 +270,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Fills in a caption's translation. Once the lower box has its translation, the box above it has been
-    /// read: it leaves, the lower box moves up, and the bottom slot is free for the next thing said.
+    /// Fills in a caption's translation, in the box that already shows its original words.
+    /// Boxes only move when something new is said: the new box enters at the bottom and pushes the others up.
     private func show(_ translation: String, for captionID: Int) {
         guard let index = captions.firstIndex(where: { $0.id == captionID }) else { return }
         captions[index].translation = translation
-        captions.removeFirst(index)
         scheduleClear()
     }
 
