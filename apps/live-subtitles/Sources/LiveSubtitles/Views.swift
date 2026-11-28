@@ -27,8 +27,6 @@ struct ControlView: View {
                 Text("\(Int(model.fontSize))").monospacedDigit().frame(width: 28, alignment: .trailing)
             }
 
-            Toggle("원문도 함께 표시", isOn: $model.showOriginal)
-
             Section {
                 Button(model.isRunning ? "자막 중지" : "자막 시작") { model.toggle() }
                     .keyboardShortcut(.defaultAction)
@@ -80,36 +78,61 @@ extension ControlView {
     }
 }
 
-/// Content of the click-through overlay pinned to the bottom of the screen.
+/// Content of the click-through overlay pinned to the bottom of the screen: two stacked boxes, each with
+/// the words as spoken and, under them, the translation.
 struct SubtitleView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             Spacer(minLength: 0)
-            if !model.translatedText.isEmpty {
-                VStack(spacing: 4) {
-                    if model.showOriginal, model.originalText != model.translatedText {
-                        line(model.originalText)
-                            .font(.system(size: model.fontSize * 0.6, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
-                    line(model.translatedText)
-                        .font(.system(size: model.fontSize, weight: .semibold))
-                        .foregroundStyle(.white)
+            if !model.captions.isEmpty {
+                ForEach(model.captions) { caption in
+                    CaptionBox(caption: caption, fontSize: model.fontSize)
+                        .transition(.opacity)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
+                // Keeps the lower slot's room while it is empty, so the upper box doesn't drop down and
+                // jump back up between one utterance and the next.
+                if model.captions.count < AppModel.maxCaptions {
+                    CaptionBox(caption: Caption(id: -1, original: " ", translation: " "), fontSize: model.fontSize)
+                        .hidden()
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.2), value: model.captions.map(\.id))
+    }
+}
+
+private struct CaptionBox: View {
+    let caption: Caption
+    let fontSize: Double
+
+    var body: some View {
+        VStack(spacing: 4) {
+            if caption.isTranslated {
+                line(caption.original, limit: 2)
+                    .font(.system(size: fontSize * 0.6, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                // Reserved from the start, so the box doesn't grow when the translation arrives.
+                line(caption.translation ?? " ", limit: 2)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .foregroundStyle(.white)
+            } else {
+                line(caption.original, limit: 2)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// A whole sentence at a time: long ones shrink a little before they are cut off.
-    private func line(_ text: String) -> some View {
+    /// Long text shrinks a little before it is cut off.
+    private func line(_ text: String, limit: Int) -> some View {
         Text(text)
-            .lineLimit(3)
+            .lineLimit(limit)
             .minimumScaleFactor(0.7)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)

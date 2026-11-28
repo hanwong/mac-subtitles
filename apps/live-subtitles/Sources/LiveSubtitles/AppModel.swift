@@ -3,6 +3,21 @@ import SwiftUI
 import Translation
 import WhisperKit
 
+/// One piece of speech on screen: the words as spoken, and their translation once it arrives.
+struct Caption: Identifiable, Equatable {
+    let id: Int
+    let original: String
+    /// Nil while the translation is still on its way.
+    var translation: String?
+    /// False when the speech is already in the subtitle language, or can't be translated.
+    var isTranslated = true
+}
+
+private struct TranslationRequest {
+    let captionID: Int
+    let text: String
+}
+
 struct LanguageOption: Identifiable, Hashable {
     let id: String
     let name: String
@@ -20,15 +35,14 @@ final class AppModel: ObservableObject {
     @Published var targetLanguageID: String { didSet { save(targetLanguageID, "targetLanguage") } }
     @Published var pace: SubtitlePace { didSet { save(pace.rawValue, "pace") } }
     @Published var fontSize: Double { didSet { save(fontSize, "fontSize") } }
-    @Published var showOriginal: Bool { didSet { save(showOriginal, "showOriginal") } }
 
     // MARK: State
 
     @Published private(set) var isRunning = false
     @Published private(set) var isStarting = false
     @Published private(set) var status = "대기 중"
-    @Published private(set) var originalText = ""
-    @Published private(set) var translatedText = ""
+    /// The boxes on screen, oldest first; at most `maxCaptions`.
+    @Published private(set) var captions: [Caption] = []
     /// The latest recognized speech, shown in the settings window so a silent overlay can be diagnosed.
     @Published private(set) var heardText = ""
     /// Loudest captured sample over the last half second; nil until audio buffers start arriving.
@@ -46,10 +60,11 @@ final class AppModel: ObservableObject {
     private var clearTask: Task<Void, Never>?
 
     /// Open translation sessions by spoken language. The id tells a restarted session's stream from the one it replaced.
-    private var streams: [String: (id: Int, continuation: AsyncStream<String>.Continuation)] = [:]
+    private var streams: [String: (id: Int, continuation: AsyncStream<TranslationRequest>.Continuation)] = [:]
     private var nextStreamID = 0
     /// Speech waiting for its language's translation session to come up.
-    private var backlog: [String: [String]] = [:]
+    private var backlog: [String: [TranslationRequest]] = [:]
+    private var nextCaptionID = 0
     private var checking: Set<String> = []
     private var untranslatable: Set<String> = []
 
@@ -64,6 +79,7 @@ final class AppModel: ObservableObject {
     /// How long a subtitle stays on screen after the audio goes quiet.
     private static let subtitleLifetime: Duration = .seconds(6)
     private static let maxBacklog = 3
+    static let maxCaptions = 2
 
     private init() {
         let defaults = UserDefaults.standard
@@ -79,7 +95,6 @@ final class AppModel: ObservableObject {
         targetLanguageID = defaults.string(forKey: "targetLanguage") ?? "ko"
         pace = defaults.string(forKey: "pace").flatMap { SubtitlePace(rawValue: $0) } ?? .balanced
         fontSize = defaults.object(forKey: "fontSize") as? Double ?? 32
-        showOriginal = defaults.bool(forKey: "showOriginal")
     }
 
     private func save(_ value: Any, _ key: String) {
@@ -207,8 +222,7 @@ final class AppModel: ObservableObject {
         heardText = ""
         audioLevel = nil
         recognitionError = ""
-        originalText = ""
-        translatedText = ""
+        captions = []
         status = "대기 중"
     }
 
@@ -220,16 +234,21 @@ final class AppModel: ObservableObject {
         heardText = text
         recognitionError = ""
 
-        if isTargetLanguage(source) || untranslatable.contains(source) {
-            show(original: text, translated: text)
-            return
-        }
+        // The original words go on screen right away; the translation is filled in underneath when it arrives.
+        let translates = !isTargetLanguage(source) && !untranslatable.contains(source)
+        nextCaptionID += 1
+        let request = TranslationRequest(captionID: nextCaptionID, text: text)
+        captions = Array((captions + [Caption(id: request.captionID, original: text, isTranslated: translates)])
+            .suffix(Self.maxCaptions))
+        scheduleClear()
+        guard translates else { return }
+
         if let stream = streams[source] {
-            stream.continuation.yield(text)
+            stream.continuation.yield(request)
             return
         }
 
-        backlog[source] = Array(((backlog[source] ?? []) + [text]).suffix(Self.maxBacklog))
+        backlog[source] = Array(((backlog[source] ?? []) + [request]).suffix(Self.maxBacklog))
         guard !translationSources.contains(source), !checking.contains(source) else { return }
         // A language heard once in the middle of another is usually a misdetection; wait for a second utterance.
         if !translationSources.isEmpty, backlog[source]?.count == 1 { return }
@@ -241,16 +260,22 @@ final class AppModel: ObservableObject {
             if availability == .unsupported {
                 // Better the original words than nothing.
                 untranslatable.insert(source)
-                for text in backlog.removeValue(forKey: source) ?? [] { show(original: text, translated: text) }
+                for request in backlog.removeValue(forKey: source) ?? [] {
+                    guard let index = captions.firstIndex(where: { $0.id == request.captionID }) else { continue }
+                    captions[index].isTranslated = false
+                }
             } else {
                 translationSources.append(source)
             }
         }
     }
 
-    private func show(original: String, translated: String) {
-        originalText = original
-        translatedText = translated
+    /// Fills in a caption's translation. Once the lower box has its translation, the box above it has been
+    /// read: it leaves, the lower box moves up, and the bottom slot is free for the next thing said.
+    private func show(_ translation: String, for captionID: Int) {
+        guard let index = captions.firstIndex(where: { $0.id == captionID }) else { return }
+        captions[index].translation = translation
+        captions.removeFirst(index)
         scheduleClear()
     }
 
@@ -259,8 +284,7 @@ final class AppModel: ObservableObject {
         clearTask = Task { [weak self] in
             try? await Task.sleep(for: Self.subtitleLifetime)
             guard !Task.isCancelled else { return }
-            self?.originalText = ""
-            self?.translatedText = ""
+            self?.captions = []
         }
     }
 
@@ -269,18 +293,18 @@ final class AppModel: ObservableObject {
         // Offers to download the language pair if it isn't installed yet.
         try? await session.prepareTranslation()
 
-        let (stream, continuation) = AsyncStream<String>.makeStream()
+        let (stream, continuation) = AsyncStream<TranslationRequest>.makeStream()
         nextStreamID += 1
         let id = nextStreamID
         streams[source] = (id, continuation)
         defer { if streams[source]?.id == id { streams[source] = nil } }
-        for text in backlog.removeValue(forKey: source) ?? [] { continuation.yield(text) }
+        for request in backlog.removeValue(forKey: source) ?? [] { continuation.yield(request) }
 
-        for await text in stream {
+        for await request in stream {
             do {
-                let response = try await session.translate(text)
+                let response = try await session.translate(request.text)
                 guard isRunning else { continue }
-                show(original: text, translated: response.targetText)
+                show(response.targetText, for: request.captionID)
             } catch {
                 if Task.isCancelled { break }
                 recognitionError = "번역 오류: \(error.localizedDescription)"

@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class OverlayController {
     private static let widthFraction = 0.8
-    private static let height: CGFloat = 320
+    private static let height: CGFloat = 480
     private static let bottomMargin: CGFloat = 24
 
     private let panel: NSPanel
